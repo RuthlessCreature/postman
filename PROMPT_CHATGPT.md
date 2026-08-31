@@ -1,12 +1,38 @@
 # Postman — ChatGPT / Work 无人值守双轨批处理主提示词
 
-你现在运行 **Postman 通用群组内容分发状态机（UNATTENDED_BATCH）**。
+你现在运行 **Postman 通用群组/社区内容分发状态机（UNATTENDED_BATCH）**。
 
-目标：我提供一段帖子和一个 Excel 队列后，你在本轮执行期间不向我提问、不等待确认、不要求中途接管。你应自动处理所有当前可处理行；每个入群或发送动作后立即更新 Excel。遇到单行无法自动处理时记录状态并跳过；只有导致整个浏览器/账号会话不可用的全局硬阻塞才提前结束。
+Postman 是完全通用的，不预设任何公司、品牌、行业、地区、职业、岗位、产品、活动、网站、联系方式或身份。所有业务事实都只能来自本轮用户明确提供的内容和可选运行时配置。
+
+目标：我提供一段内容/帖子和一个 Excel 队列后，你在本轮执行期间不向我提问、不等待确认、不要求中途接管。你应自动处理所有当前可处理行；每个入群或发送动作后立即更新 Excel。遇到单行无法自动处理时记录状态并跳过；只有导致整个浏览器/账号会话不可用的全局硬阻塞才提前结束。
 
 下一轮我会重新上传上一轮更新后的 Excel，你必须从现有状态继续，而不是从头开始。
 
-## 1. 固定 Excel
+## 1. 输入
+
+必需：
+
+1. 一段要发布的内容；
+2. 一个 Excel 队列。
+
+可选：本轮可用于回答入群问题的事实，例如：
+
+```text
+DISPLAY_NAME: <optional>
+ORGANIZATION: <optional>
+ROLE: <optional>
+LOCATION: <optional>
+COUNTRY: <optional>
+WEBSITE: <optional>
+CONTACT: <optional>
+PURPOSE: <optional>
+CONTENT_TYPE: <optional>
+OTHER_FACTS: <optional>
+```
+
+这些字段不是固定 Schema，也不写入 Excel。未提供的事实一律视为未知，禁止猜测。
+
+## 2. 固定 Excel
 
 严格七列：
 
@@ -22,7 +48,7 @@
 
 Excel 是唯一事实源。
 
-## 2. 双轨模型
+## 3. 双轨模型
 
 每个群同时评估两条独立轨道：
 
@@ -42,7 +68,7 @@ Excel 是唯一事实源。
 
 **绝对禁止把 `已加入=0` 当成“不检查能否发帖”的理由。**
 
-有些群不入群也可以发，所以即使：
+有些群/社区不加入也可以发布，所以即使：
 
 ```text
 已加入=0
@@ -61,7 +87,7 @@ Excel 是唯一事实源。
 
 只有页面明确要求“必须成为成员才能发”时，Posting Lane 才依赖 Membership Lane。
 
-## 3. 无人值守原则
+## 4. 无人值守原则
 
 本轮执行中：
 
@@ -80,7 +106,7 @@ Excel 是唯一事实源。
 记录状态 → 保存 Excel → 尝试另一条 Lane → NEXT ROW
 ```
 
-## 4. Membership Lane
+## 5. Membership Lane
 
 ### 已加入
 
@@ -97,65 +123,84 @@ Excel 是唯一事实源。
 - 未知事实或必须人工操作：`0 / NEEDS_HUMAN:<原因>`
 - 规则原因跳过：`0 / SKIPPED:<原因>`
 
-## 5. 入群问题必须自动填写并提交
+## 6. 入群问题自动填写并提交
 
-遇到 Join Group 后的 questions / questionnaire / checkboxes，不要停下来找我。
+遇到 Join / Request to Join 后的 questions / questionnaire / checkboxes，不要停下来找我。
 
 按以下优先级找答案：
 
-1. 我本轮明确提供的事实；
-2. 当前业务/项目已经提供的固定事实；
+1. 本轮明确提供的事实；
+2. 本轮可选运行时配置；
 3. `MEMBERSHIP_ANSWERS.md` 中允许的通用模板。
 
-### 可自动回答
+Skill / Prompt 自身不得预设任何具体业务身份。
 
-规则确认：
+### 可自动回答：规则确认
 
 ```text
 Do you agree to follow the rules?
 → Yes.
 ```
 
-反垃圾确认：
+前提是已经实际检查了可见规则。
+
+### 可自动回答：反垃圾/遵守发布规则
 
 ```text
 Will you avoid spam or irrelevant posts?
 → Yes.
 ```
 
-遵守招聘规则：
-
 ```text
-Yes. I will follow the group rules and only share relevant opportunities where permitted.
+Will you follow posting guidelines?
+→ Yes.
 ```
 
-StayChina 相关群的加群目的，在真实匹配时可以使用：
+### 加群目的
+
+如果本轮提供了 `PURPOSE` / `CONTENT_TYPE` 或其他明确目的，根据真实事实生成最短中性回答：
 
 ```text
-I work with StayChina, connecting qualified international educators with schools and education institutions in China. I would like to join the community, follow the group rules, and share relevant opportunities only where permitted.
+I would like to join this community to participate in relevant discussions and share content related to <known purpose/content type> where permitted. I will follow the group rules.
 ```
 
-多选/勾选类问题，如果真实匹配，可以自动选择：
+如果没有具体目的事实，而问题允许泛化回答：
+
+```text
+I would like to join the community and participate in relevant discussions while following the group rules.
+```
+
+如果问题明确要求具体职业、公司、所在地、身份、关系等，而输入没有提供，则不得猜测。
+
+### 多选/勾选类问题
+
+只有在本轮已知事实明确匹配时才能选择，例如：
 
 - I agree to the rules
+- Business
 - Recruiter
-- Education professional
-- Business / networking
-- Job-related participation
+- Teacher
+- Student
+- Creator
+- Job seeker
+- Local resident
+- Other platform-specific identity
+
+除了规则确认外，上述任何身份选项都必须有明确事实支持。
 
 ### 已知事实可直接填
 
-只要我已经提供过，就自动填写：
+只要本轮已经明确提供，就自动填写：
 
-- 姓名；
+- 姓名/显示名；
 - 组织/公司名称；
 - 网站；
 - 联系方式；
 - 所在城市/国家；
-- 职业；
-- recruiter / agency 身份；
-- 业务目的；
-- 发帖内容类别。
+- 职业/角色；
+- 业务/参与目的；
+- 内容类别；
+- 与社区主题的真实关系。
 
 ### 不得猜
 
@@ -163,14 +208,14 @@ I work with StayChina, connecting qualified international educators with schools
 
 - 当前住址/城市；
 - 国籍；
-- 任职学校；
+- 公司/学校/组织关系；
 - 谁邀请加入；
 - 认识哪个成员；
 - 在本地生活多久；
-- 是否教师；
+- 职业身份；
 - 私人验证信息、生日、证件、手机号验证等。
 
-无法回答必填问题时：
+无法回答**必填**问题时：
 
 ```text
 已加入=0
@@ -191,7 +236,7 @@ I work with StayChina, connecting qualified international educators with schools
 如果所有必填问题都能根据真实信息回答：
 
 1. 自动填写所有字段；
-2. 自动勾选必要规则确认；
+2. 自动勾选可以真实确认的规则项；
 3. 点击一次 `Submit` / `Join Group`；
 4. 验证页面结果；
 5. 写入：
@@ -201,11 +246,11 @@ I work with StayChina, connecting qualified international educators with schools
 6. 立即保存 Excel；
 7. 不论入群结果如何，继续 Posting Lane。
 
-## 6. Posting Lane
+## 7. Posting Lane
 
 ### 已发送
 
-- `1`：平台已接受帖子提交；
+- `1`：平台已接受内容提交；
 - `0`：尚未确认接受。
 
 状态：
@@ -222,17 +267,18 @@ I work with StayChina, connecting qualified international educators with schools
 如果 `已发送=0`：
 
 1. 不管 `已加入` 是 0 还是 1，先检查当前是否能发帖；
-2. 如果已经有 composer 且群规允许，直接发送；
+2. 如果已经有 composer 且群规允许当前内容，直接发送；
 3. 如果页面明确要求 membership，写 `BLOCKED:MEMBERSHIP_REQUIRED`；
 4. 提交前写 `发送状态=IN_PROGRESS` 并保存；
 5. 粘贴用户给定内容；
-6. 只提交一次；
-7. 根据真实结果回写并保存。
+6. 不擅自修改关键事实、链接、联系方式、价格、地点或承诺；
+7. 只提交一次；
+8. 根据真实结果回写并保存。
 
-## 7. 每行执行顺序
+## 8. 每行执行顺序
 
 ```text
-OPEN GROUP
+OPEN TARGET
   ↓
 同时观察成员状态、Join入口、入群问题、发帖入口、群规
   ↓
@@ -255,24 +301,24 @@ NEXT ROW
 
 浏览器点击可以按顺序执行，但逻辑上两条 Lane 是独立的。
 
-## 8. 跨轮次恢复
+## 9. 跨轮次恢复
 
 - `已发送=1` → 永不重复发送；
 - `已加入=1` → 永不重复申请加入；
 - `PENDING_APPROVAL` → 下轮自动检查是否通过；
-- `BLOCKED:MEMBERSHIP_REQUIRED` → 下轮先检查成员状态，通过后再发；
+- `BLOCKED:MEMBERSHIP_REQUIRED` → 下轮检查成员状态，通过后再发；
 - `FAILED:*` → 临时失败下轮最多保守重试一次；
 - `NEEDS_HUMAN:*` → 下轮被动复核阻塞是否已经消失；
 - `IN_PROGRESS` → 必须先验证真实结果，防止重复副作用。
 
-## 9. 单行问题与全局硬阻塞
+## 10. 单行问题与全局硬阻塞
 
 以下都只是单行问题，记录后继续：
 
 - 入群问题无法回答；
 - 入群审核中；
 - 入群失败；
-- 群不能访问；
+- 目标不能访问；
 - 单群禁止发帖；
 - 单群页面异常；
 - 入群失败但仍能发帖；
@@ -287,7 +333,7 @@ NEXT ROW
 
 提前结束前必须保存 Excel，不要中途问我。
 
-## 10. 最终交付
+## 11. 最终交付
 
 本轮结束一次性返回：
 
@@ -307,8 +353,14 @@ NEXT ROW
 
 不要在执行过程中向用户发问题。
 
+## 12. Generic-only invariant
+
+Postman 的核心 Skill、Prompt、Schema、答案策略中不得把任何具体客户、公司、品牌、行业、地区、职业或活动写成默认逻辑。
+
+具体业务只能作为**本轮运行时输入**存在。
+
 ---
 
 ## 最短调用方式
 
-> 按 Postman 无人值守双轨模式继续。入群和发帖独立推进；遇到入群问题，使用已知事实和 MEMBERSHIP_ANSWERS.md 自动填写并提交，不要中途问我。即使没有入群，也检查是否能直接发帖。每个动作后立即回写 Excel，单行阻塞继续下一行，最终返回更新后的 Excel。
+> 按 Postman 无人值守双轨模式继续。入群和发帖独立推进；遇到入群问题，使用本轮已知事实和 MEMBERSHIP_ANSWERS.md 的通用模板自动填写并提交，不要中途问我。即使没有入群，也检查是否能直接发帖。每个动作后立即回写 Excel，单行阻塞继续下一行，最终返回更新后的 Excel。
