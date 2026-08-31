@@ -1,168 +1,244 @@
-# Postman Excel Schema
+# Postman V2 Excel Schema
 
-## Sheet
+Postman V2 uses two independent workbooks:
 
-默认工作表名建议为 `Groups`。用户现有文件使用其他工作表名也可以，只要完整包含固定七列。
+1. **Group State Workbook** — execution state, membership, posting, history.
+2. **Content Library Workbook** — indexed copy and campaign rules.
 
-## Fixed columns
+They are joined at runtime; do not merge them into one giant sheet.
 
-| Col | Header | Type | Allowed values / format |
+---
+
+## A. Group State Workbook
+
+### Groups sheet
+
+The original seven columns remain fixed at the left for backward compatibility:
+
+| Col | Header | Type | Meaning |
 |---|---|---|---|
-| A | 序号 | Integer | `>=1`，建议唯一 |
-| B | group名称 | Text | 非空 |
-| C | group url | Text/URL | 目标群组 URL |
-| D | 已加入 | Integer Boolean | `0` or `1` |
-| E | 入群状态 | Text | Membership Lane 状态 |
-| F | 已发送 | Integer Boolean | `0` or `1` |
-| G | 发送状态 | Text | Posting Lane 状态 |
+| A | 序号 | Integer | Stable row/group ID |
+| B | group名称 | Text | Group/community name |
+| C | group url | URL | Target URL |
+| D | 已加入 | 0/1 | Membership fact |
+| E | 入群状态 | Text | Membership Lane state |
+| F | 已发送 | 0/1 | Latest/current posting-state fact |
+| G | 发送状态 | Text | Posting Lane state |
 
-这七列既是输入，也是跨轮次持久化状态。不得依赖聊天记忆代替 Excel。
+V2 appends the following columns after G:
 
-## Fundamental rule
+| Header | Meaning |
+|---|---|
+| Group_Type | EXPAT / BUSINESS / VISA_HELP / TEACHER / SCHOOL / CITY_EXPAT / MOVING_TO_CHINA / GENERAL / UNKNOWN |
+| Language | EN / ZH / ANY |
+| Campaign_ID | Row-level campaign override; blank uses Run_Config |
+| Last_Post_ID | Most recent attempted/successful post ID |
+| Last_Post_Time | Timestamp of latest posting attempt/success as maintained by the agent |
+| Next_Eligible_At | Earliest next posting time when repeat mode explicitly permits it |
+| Send_Count | Cumulative actual posting attempts/successes according to implementation policy |
+| Last_Post_URL | Published post URL when available |
+| Last_Result | Most recent posting result |
+| Failure_Reason | Most recent failure reason |
+| Last_Checked_At | Last page inspection timestamp |
+| Group_Rules_Summary | Short summary of visible posting rules relevant to this campaign |
+| Promo_Allowed | YES / NO / UNKNOWN |
+| Notes | Operator/agent notes |
 
-Membership Lane 与 Posting Lane 独立：
+### Legacy migration
 
-```text
-已加入=0 不能推出 不能发帖
-已加入=1 不能推出 一定能发帖
-```
+Any workbook containing the original seven columns is valid input.
 
-因此以下组合合法：
+Postman must migrate it append-only:
 
-```text
-D=0 / E=PENDING_APPROVAL
-F=1 / G=SUCCESS_VISIBLE
-```
+- never delete/reorder A:G;
+- preserve all existing statuses;
+- append V2 columns if missing;
+- create `Post_History` and `Run_Config` if missing;
+- never reset an existing success merely to enable V2.
 
-仅当平台明确要求 membership 时，Posting Lane 才依赖 Membership Lane。
+---
 
-## Membership state mapping
+## B. Membership Lane states
 
-| 入群状态 | 已加入 | Meaning | Next-run behavior |
-|---|---:|---|---|
-| `PENDING` | 0 | 尚未处理 | 自动尝试 |
-| `IN_PROGRESS` | 0 | 上轮可能中断 | 先验证真实状态再重试 |
-| `SUCCESS` | 1 | 加入成功 | 不再入群 |
-| `SUCCESS:ALREADY_MEMBER` | 1 | 页面确认原本已加入 | 不再入群 |
-| `PENDING_APPROVAL` | 0 | 入群申请已提交 | 下轮自动复核，不重复申请 |
-| `NOT_REQUIRED:POSTING_ALLOWED_WITHOUT_MEMBERSHIP` | 0 | 非成员已有发帖权限，成员身份不是当前发帖前置 | Posting Lane 可独立继续 |
-| `FAILED:<reason>` | 0 | 入群失败 | 临时失败可后续再试 |
-| `SKIPPED:<reason>` | 0 | 按规则主动跳过 | 默认不重试 |
-| `NEEDS_HUMAN:<reason>` | 0 | 本轮无法自动解决 | 本轮跳过 Membership Lane，但仍检查 Posting Lane |
+| 入群状态 | 已加入 | Meaning |
+|---|---:|---|
+| PENDING | 0 | Not yet handled |
+| IN_PROGRESS | 0 | Previous run may have been interrupted |
+| SUCCESS | 1 | Joined successfully |
+| SUCCESS:ALREADY_MEMBER | 1 | Page confirmed existing membership |
+| PENDING_APPROVAL | 0 | Join request submitted |
+| NOT_REQUIRED:POSTING_ALLOWED_WITHOUT_MEMBERSHIP | 0 | Posting available without membership |
+| FAILED:<reason> | 0 | Membership attempt failed |
+| SKIPPED:<reason> | 0 | Intentionally skipped |
+| NEEDS_HUMAN:<reason> | 0 | Required fact/action unavailable this run |
 
-## Sending state mapping
+Membership and posting remain independent. `已加入=0` does not imply posting is unavailable.
 
-| 发送状态 | 已发送 | Meaning | Next-run behavior |
-|---|---:|---|---|
-| `PENDING` | 0 | 尚未处理 | 自动尝试 |
-| `IN_PROGRESS` | 0 | 上轮可能在提交附近中断 | 必须验证是否已经提交 |
-| `SUCCESS_VISIBLE` | 1 | 已公开可见 | 永不自动重发 |
-| `SUCCESS_PENDING_REVIEW` | 1 | 平台已接受，等待审核 | 永不自动重发 |
-| `BLOCKED:MEMBERSHIP_REQUIRED` | 0 | 页面明确要求先成为成员 | 下轮先复核 Membership Lane |
-| `FAILED:<reason>` | 0 | 发布失败 | 临时失败可后续再试 |
-| `SKIPPED:<reason>` | 0 | 按规则跳过 | 默认不重试 |
-| `NEEDS_HUMAN:<reason>` | 0 | 本轮不能自动解决 | 本轮跳过 Posting Lane |
+---
 
-## Join-question automation
+## C. Posting Lane states
 
-入群问题由 Postman 在单轮中自动处理，答案来源优先级：
+| 发送状态 | 已发送 | Meaning |
+|---|---:|---|
+| PENDING | 0 | Not yet handled |
+| IN_PROGRESS | 0 | Submission may be in flight/unknown |
+| SUCCESS_VISIBLE | 1 | Post visibly published |
+| SUCCESS_PENDING_REVIEW | 1 | Platform accepted post for moderation |
+| BLOCKED:MEMBERSHIP_REQUIRED | 0 | Membership explicitly required |
+| SKIPPED:RULE_PROHIBITS | 0 | Group rules prohibit current content |
+| SKIPPED:NO_SUITABLE_COPY | 0 | No eligible Post_ID for this group/campaign |
+| SKIPPED:ALREADY_SENT_THIS_CAMPAIGN | 0 | Campaign duplicate guard |
+| SKIPPED:COOLDOWN | 0 | Not yet eligible under configured repeat mode |
+| FAILED:<reason> | 0 | Submission failed |
+| NEEDS_HUMAN:<reason> | 0 | Manual requirement exists |
 
-1. 用户本轮提供的事实；
-2. 当前项目/业务固定事实；
-3. `MEMBERSHIP_ANSWERS.md` 允许的安全模板。
+`SUCCESS_PENDING_REVIEW` counts as sent.
 
-所有必填问题都能真实回答时，自动填写并提交 Join 请求。
+---
 
-如果存在无法确定的事实型必填问题：
+## D. Post_History sheet
 
-```text
-D=0
-E=NEEDS_HUMAN:QUESTION_REQUIRES_USER_FACT
-```
+Append one row for every actual posting attempt.
 
-该状态不得导致整批暂停，也不得阻止 Posting Lane 检查非成员发帖能力。
+Recommended columns:
 
-## Recommended reason codes
+1. Event_ID
+2. Run_ID
+3. 序号
+4. Group_Name
+5. Group_URL
+6. Post_ID
+7. Campaign_ID
+8. Attempted_At
+9. Result
+10. Post_URL
+11. Failure_Reason
+12. Membership_State
+13. Posting_State
+14. Group_Type
+15. Language
+16. Notes
 
-### Membership
+`Post_History` is the authoritative multi-run posting history. Do not store history inside the Content Library.
 
-- `INVALID_TARGET`
-- `UNREACHABLE_TARGET`
-- `JOIN_NOT_AVAILABLE`
-- `RULE_PROHIBITS`
-- `QUESTION_REQUIRES_USER_FACT`
-- `QUESTION_FORM_SUBMIT_FAILED`
-- `CAPTCHA`
-- `LOGIN_REQUIRED`
-- `ACCOUNT_RESTRICTED`
-- `UNKNOWN`
+---
 
-### Sending
+## E. Run_Config sheet
 
-- `INVALID_TARGET`
-- `UNREACHABLE_TARGET`
-- `MEMBERSHIP_REQUIRED`
-- `POSTING_DISABLED`
-- `RULE_PROHIBITS`
-- `CONTENT_REJECTED`
-- `CAPTCHA`
-- `LOGIN_REQUIRED`
-- `ACCOUNT_RESTRICTED`
-- `SUBMIT_NOT_CONFIRMED`
-- `UNKNOWN`
+Recommended keys:
 
-## Critical unattended semantics
+| Key | Example | Meaning |
+|---|---|---|
+| Active_Campaign_ID | COMPANY-SETUP | Default campaign |
+| Default_Language | EN | Language fallback |
+| Repeat_Mode | ONCE_PER_CAMPAIGN | Safe default |
+| Default_Cooldown_Days | 30 | Used only in ROTATE_AFTER_COOLDOWN |
+| Max_Posts_Per_Run | 0 | 0 means no user-defined cap |
+| Dry_Run | FALSE | Inspect/match only if TRUE |
+| Allow_Copy_Adaptation | MINIMAL | EXACT or MINIMAL |
+| Require_Promo_Rule_Check | TRUE | Skip promotional content when rules prohibit it |
+| History_Sheet | Post_History | History location |
 
-`NEEDS_HUMAN` 不表示立即暂停找用户。
-
-它表示：该 Lane 本轮无法自动完成，把阻塞写入 Excel，继续同一行另一条 Lane，然后继续下一行。
-
-单次运行期间不得因为以下情况停下来询问：
-
-- 入群问题无法真实回答；
-- 单群入群审核；
-- 单群 Join 失败；
-- 单群发帖失败；
-- 单群页面异常。
-
-只有登录验证、账号级限制、平台级 CAPTCHA、浏览器失效等导致整个会话无法继续时才提前结束；结束前必须保存 Excel。
-
-## Recovery from IN_PROGRESS
-
-`IN_PROGRESS` 不可盲目重试。
-
-1. reopen target;
-2. verify current visible membership/post state;
-3. only then choose final state;
-4. never blindly click Join/Post again.
-
-Duplicate prevention has priority over retry speed.
-
-## Retry rules
-
-- `PENDING_APPROVAL`：下轮复核，不重复提交旧申请。
-- `BLOCKED:MEMBERSHIP_REQUIRED`：成员状态变为1后可再次尝试发帖。
-- `FAILED:*`：临时失败每轮最多主动重试一次。
-- `NEEDS_HUMAN:*`：下轮可被动复核是否已解除。
-
-## Invariants
+Safe default:
 
 ```text
-已加入=1 => 入群状态描述确认/成功成员资格
-已发送=1 => 发送状态为 SUCCESS_VISIBLE 或 SUCCESS_PENDING_REVIEW
-SUCCESS_VISIBLE => 已发送=1
-SUCCESS_PENDING_REVIEW => 已发送=1
-PENDING_APPROVAL => 已加入=0
-NOT_REQUIRED:POSTING_ALLOWED_WITHOUT_MEMBERSHIP => 已加入=0
-BLOCKED:MEMBERSHIP_REQUIRED => 已发送=0
-NEEDS_HUMAN:* 不得自动推导另一条 Lane 失败
+Repeat_Mode = ONCE_PER_CAMPAIGN
 ```
 
-## User reset semantics
+Optional:
 
-两轮之间用户可以主动重置：
+```text
+Repeat_Mode = ROTATE_AFTER_COOLDOWN
+```
 
-- 重试入群：`已加入=0`, `入群状态=PENDING`；
-- 明确允许重新发帖：`已发送=0`, `发送状态=PENDING`。
+Only when group rules allow recurring promotional posts. Rotation must never be used to bypass anti-spam/platform enforcement.
 
-Agent 不得为了强行重试自行重置成功状态。
+---
+
+# Content Library Workbook
+
+## Copy_Index sheet
+
+Required columns:
+
+1. Post_ID
+2. Campaign_ID
+3. Status
+4. Language
+5. Audience_Type
+6. Group_Type_Match
+7. Geo_Match
+8. Angle
+9. Hook
+10. Body_Copy
+11. Landing_URL
+12. Priority
+13. Weight
+14. Cooldown_Days
+15. UTM_Content
+16. Compliance_Note
+17. Notes
+
+Only `Status=ACTIVE` rows are eligible.
+
+`Post_ID` is immutable and unique.
+
+Normal Postman runs treat the Content Library as read-only.
+
+## Campaigns sheet
+
+Recommended columns:
+
+- Campaign_ID
+- Campaign_Name
+- Status
+- Default_Language
+- Repeat_Mode
+- Default_Cooldown_Days
+- Landing_URL
+- Objective
+- Notes
+
+## Match_Rules sheet
+
+Recommended columns:
+
+- Rule_ID
+- Campaign_ID
+- Group_Type
+- Language
+- Keyword_Hints
+- Preferred_Post_IDs
+- Priority
+- Rule
+
+This sheet tells Postman which copy is most suitable for which audience. It is not a hard one-group-one-post binding.
+
+---
+
+# Content-selection order
+
+1. Resolve Campaign_ID.
+2. Filter ACTIVE copy by campaign.
+3. Match language.
+4. Match group type/audience.
+5. Apply geography when relevant.
+6. Check group rules / Promo_Allowed.
+7. Apply Match_Rules preferred IDs.
+8. Apply duplicate/cooldown guard using Groups + Post_History.
+9. Rank by Priority, Weight, least-recent use, then Post_ID.
+10. Publish Body_Copy exactly or minimally adapt only when permitted.
+
+---
+
+# Fundamental invariants
+
+```text
+已加入=0  ≠  不能发帖
+已加入=1  ≠  一定能发帖
+Content Library = read-only during normal runs
+Post_History = execution history
+旧7列 = 永远保留在左侧
+同一 Campaign 默认每群只成功发送一次
+重复投放必须显式开启 cooldown 模式且符合群规
+```
