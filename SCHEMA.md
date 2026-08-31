@@ -12,11 +12,29 @@
 | B | group名称 | Text | 非空 |
 | C | group url | Text/URL | 目标群组 URL |
 | D | 已加入 | Integer Boolean | `0` or `1` |
-| E | 入群状态 | Text | 状态码，可追加失败原因 |
+| E | 入群状态 | Text | Membership Lane 状态 |
 | F | 已发送 | Integer Boolean | `0` or `1` |
-| G | 发送状态 | Text | 状态码，可追加失败原因 |
+| G | 发送状态 | Text | Posting Lane 状态 |
 
-这七列既是输入，也是跨轮次持久化状态。**不得依赖聊天记忆代替 Excel。**
+这七列既是输入，也是跨轮次持久化状态。不得依赖聊天记忆代替 Excel。
+
+## Fundamental rule
+
+Membership Lane 与 Posting Lane 独立：
+
+```text
+已加入=0 不能推出 不能发帖
+已加入=1 不能推出 一定能发帖
+```
+
+因此以下组合合法：
+
+```text
+D=0 / E=PENDING_APPROVAL
+F=1 / G=SUCCESS_VISIBLE
+```
+
+仅当平台明确要求 membership 时，Posting Lane 才依赖 Membership Lane。
 
 ## Membership state mapping
 
@@ -26,41 +44,43 @@
 | `IN_PROGRESS` | 0 | 上轮可能中断 | 先验证真实状态再重试 |
 | `SUCCESS` | 1 | 加入成功 | 不再入群 |
 | `SUCCESS:ALREADY_MEMBER` | 1 | 页面确认原本已加入 | 不再入群 |
-| `PENDING_APPROVAL` | 0 | 入群申请已提交 | 下轮自动复核，不盲目重复申请 |
-| `FAILED:<reason>` | 0 | 入群失败 | 临时失败可在后续轮次再试一次 |
-| `SKIPPED:<reason>` | 0 | 规则/目标原因主动跳过 | 默认不重试 |
-| `NEEDS_HUMAN:<reason>` | 0 | 本轮不能自动解决 | 本轮跳过；下轮可被动复核是否已变化 |
+| `PENDING_APPROVAL` | 0 | 入群申请已提交 | 下轮自动复核，不重复申请 |
+| `NOT_REQUIRED:POSTING_ALLOWED_WITHOUT_MEMBERSHIP` | 0 | 非成员已有发帖权限，成员身份不是当前发帖前置 | Posting Lane 可独立继续 |
+| `FAILED:<reason>` | 0 | 入群失败 | 临时失败可后续再试 |
+| `SKIPPED:<reason>` | 0 | 按规则主动跳过 | 默认不重试 |
+| `NEEDS_HUMAN:<reason>` | 0 | 本轮无法自动解决 | 本轮跳过 Membership Lane，但仍检查 Posting Lane |
 
 ## Sending state mapping
 
 | 发送状态 | 已发送 | Meaning | Next-run behavior |
 |---|---:|---|---|
 | `PENDING` | 0 | 尚未处理 | 自动尝试 |
-| `IN_PROGRESS` | 0 | 上轮可能在提交附近中断 | 必须验证是否已经提交，禁止盲目重发 |
+| `IN_PROGRESS` | 0 | 上轮可能在提交附近中断 | 必须验证是否已经提交 |
 | `SUCCESS_VISIBLE` | 1 | 已公开可见 | 永不自动重发 |
 | `SUCCESS_PENDING_REVIEW` | 1 | 平台已接受，等待审核 | 永不自动重发 |
-| `FAILED:<reason>` | 0 | 发布失败 | 临时失败可在后续轮次再试 |
-| `SKIPPED:<reason>` | 0 | 规则/目标原因跳过 | 默认不重试 |
-| `NEEDS_HUMAN:<reason>` | 0 | 本轮不能自动解决 | 本轮跳过；下轮可被动复核 |
+| `BLOCKED:MEMBERSHIP_REQUIRED` | 0 | 页面明确要求先成为成员 | 下轮先复核 Membership Lane |
+| `FAILED:<reason>` | 0 | 发布失败 | 临时失败可后续再试 |
+| `SKIPPED:<reason>` | 0 | 按规则跳过 | 默认不重试 |
+| `NEEDS_HUMAN:<reason>` | 0 | 本轮不能自动解决 | 本轮跳过 Posting Lane |
 
-## Critical unattended semantics
+## Join-question automation
 
-`NEEDS_HUMAN` 的含义不是“立刻暂停并叫用户处理”。
+入群问题由 Postman 在单轮中自动处理，答案来源优先级：
 
-它表示：
+1. 用户本轮提供的事实；
+2. 当前项目/业务固定事实；
+3. `MEMBERSHIP_ANSWERS.md` 允许的安全模板。
 
-> 该行在本轮无法自动完成，把阻塞持久化到 Excel，然后继续其他行。
+所有必填问题都能真实回答时，自动填写并提交 Join 请求。
 
-单次运行期间不得为了以下情况停下来询问用户：
+如果存在无法确定的事实型必填问题：
 
-- 无法回答的入群问题；
-- 单群验证码或弹窗；
-- 单群页面异常；
-- 单群禁止发布；
-- 单群加入失败；
-- 入群审核中。
+```text
+D=0
+E=NEEDS_HUMAN:QUESTION_REQUIRES_USER_FACT
+```
 
-只有当登录验证、账号限制、平台级 CAPTCHA、浏览器失效等导致**整个会话无法继续**时，才可以提前结束本轮；但仍必须先保存 Excel，并在最终结果中一次性说明。
+该状态不得导致整批暂停，也不得阻止 Posting Lane 检查非成员发帖能力。
 
 ## Recommended reason codes
 
@@ -71,6 +91,7 @@
 - `JOIN_NOT_AVAILABLE`
 - `RULE_PROHIBITS`
 - `QUESTION_REQUIRES_USER_FACT`
+- `QUESTION_FORM_SUBMIT_FAILED`
 - `CAPTCHA`
 - `LOGIN_REQUIRED`
 - `ACCOUNT_RESTRICTED`
@@ -80,7 +101,7 @@
 
 - `INVALID_TARGET`
 - `UNREACHABLE_TARGET`
-- `NOT_MEMBER`
+- `MEMBERSHIP_REQUIRED`
 - `POSTING_DISABLED`
 - `RULE_PROHIBITS`
 - `CONTENT_REJECTED`
@@ -90,61 +111,58 @@
 - `SUBMIT_NOT_CONFIRMED`
 - `UNKNOWN`
 
-Examples:
+## Critical unattended semantics
 
-```text
-FAILED:UNREACHABLE_TARGET
-NEEDS_HUMAN:QUESTION_REQUIRES_USER_FACT
-NEEDS_HUMAN:CAPTCHA
-SKIPPED:RULE_PROHIBITS
-```
+`NEEDS_HUMAN` 不表示立即暂停找用户。
+
+它表示：该 Lane 本轮无法自动完成，把阻塞写入 Excel，继续同一行另一条 Lane，然后继续下一行。
+
+单次运行期间不得因为以下情况停下来询问：
+
+- 入群问题无法真实回答；
+- 单群入群审核；
+- 单群 Join 失败；
+- 单群发帖失败；
+- 单群页面异常。
+
+只有登录验证、账号级限制、平台级 CAPTCHA、浏览器失效等导致整个会话无法继续时才提前结束；结束前必须保存 Excel。
 
 ## Recovery from IN_PROGRESS
 
-`IN_PROGRESS` is not safe-to-retry.
+`IN_PROGRESS` 不可盲目重试。
 
-If a previous run ended with a row in `IN_PROGRESS`:
-
-1. reopen the target;
+1. reopen target;
 2. verify current visible membership/post state;
-3. only after verification choose a final state;
+3. only then choose final state;
 4. never blindly click Join/Post again.
 
-For sending, duplicate prevention has higher priority than retry speed.
+Duplicate prevention has priority over retry speed.
 
-## Retry rules across iterations
+## Retry rules
 
-### `PENDING_APPROVAL`
-
-Every later run may re-check status. Do not submit another join request while the old request is still pending.
-
-### `FAILED:*`
-
-Transient failures may be retried on a later run. Permanent rule failures should be normalized to `SKIPPED:*`.
-
-Because the schema intentionally remains seven columns, retry counters are not stored separately. Therefore the agent must use conservative retries: **at most one active retry per row per run**.
-
-### `NEEDS_HUMAN:*`
-
-A later run may passively check whether the blocker disappeared between runs. If it still requires user-specific facts, CAPTCHA, identity verification, or manual action, leave it unchanged and continue.
+- `PENDING_APPROVAL`：下轮复核，不重复提交旧申请。
+- `BLOCKED:MEMBERSHIP_REQUIRED`：成员状态变为1后可再次尝试发帖。
+- `FAILED:*`：临时失败每轮最多主动重试一次。
+- `NEEDS_HUMAN:*`：下轮可被动复核是否已解除。
 
 ## Invariants
 
 ```text
-已加入=1  => 入群状态 describes confirmed/successful membership
-已发送=1  => 发送状态 is SUCCESS_VISIBLE or SUCCESS_PENDING_REVIEW
+已加入=1 => 入群状态描述确认/成功成员资格
+已发送=1 => 发送状态为 SUCCESS_VISIBLE 或 SUCCESS_PENDING_REVIEW
 SUCCESS_VISIBLE => 已发送=1
 SUCCESS_PENDING_REVIEW => 已发送=1
 PENDING_APPROVAL => 已加入=0
-FAILED:* => corresponding boolean stays 0 unless success is separately verified
-NEEDS_HUMAN:* => corresponding boolean stays 0 unless success is separately verified
+NOT_REQUIRED:POSTING_ALLOWED_WITHOUT_MEMBERSHIP => 已加入=0
+BLOCKED:MEMBERSHIP_REQUIRED => 已发送=0
+NEEDS_HUMAN:* 不得自动推导另一条 Lane 失败
 ```
 
 ## User reset semantics
 
-Between runs, the user may intentionally reset a row:
+两轮之间用户可以主动重置：
 
-- retry membership from scratch: `已加入=0`, `入群状态=PENDING`;
-- intentionally allow repost: `已发送=0`, `发送状态=PENDING`.
+- 重试入群：`已加入=0`, `入群状态=PENDING`；
+- 明确允许重新发帖：`已发送=0`, `发送状态=PENDING`。
 
-The agent must never perform these resets on its own merely to force another attempt.
+Agent 不得为了强行重试自行重置成功状态。
