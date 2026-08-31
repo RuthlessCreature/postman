@@ -1,17 +1,19 @@
 ---
 name: postman
-description: Generic unattended, resumable group/community posting workflow driven by a seven-column Excel queue. Membership and posting are independent state machines. Automatically answer and submit join questions when answers are grounded in supplied facts or the approved answer policy. Process all actionable rows without mid-run user interaction, checkpoint Excel after each side effect, defer unresolved row-level blockers, and resume from the updated workbook next iteration.
+description: Generic unattended, resumable group/community posting workflow driven by a seven-column Excel queue. Membership and posting are independent state machines. Automatically answer and submit join questions only when answers are grounded in runtime-supplied facts or generic approved answer templates. Process all actionable rows without mid-run user interaction, checkpoint Excel after each side effect, defer unresolved row-level blockers, and resume from the updated workbook next iteration.
 ---
 
 # Postman
 
 ## Purpose
 
-Run an **unattended, resumable dual-lane content-distribution workflow** across groups or communities using a user-provided Excel queue.
+Run an **unattended, resumable, business-agnostic dual-lane content-distribution workflow** across groups or communities using a user-provided Excel queue.
+
+Postman MUST NOT assume any specific company, brand, industry, campaign, geography, job type, product, identity, or posting purpose. All task-specific facts come from runtime input.
 
 The user does not intervene during a run. Process every currently actionable row, persist all results into the workbook, defer unresolved work, and return the updated workbook. The next run resumes from that workbook.
 
-Before execution read `MEMBERSHIP_ANSWERS.md` when available.
+Before execution, read `MEMBERSHIP_ANSWERS.md` when available.
 
 ## Required inputs
 
@@ -24,8 +26,11 @@ Before execution read `MEMBERSHIP_ANSWERS.md` when available.
    - `入群状态`
    - `已发送`
    - `发送状态`
+3. Optional runtime facts/configuration supplied by the user for this specific run, such as name, organization, role, location, website, contact, purpose, content type, or other known facts.
 
-Do not rename, reorder, delete, or insert columns.
+Do not rename, reorder, delete, or insert Excel columns.
+
+Never invent a missing runtime fact.
 
 ## Core model: TWO INDEPENDENT LANES
 
@@ -119,7 +124,7 @@ Determine from visible evidence:
 - whether join questions are present;
 - whether posting/composer is currently available even without membership;
 - whether membership is explicitly required before posting;
-- whether group/community rules prohibit the content.
+- whether group/community rules prohibit the supplied content.
 
 Do not infer posting permission only from membership state.
 
@@ -143,40 +148,53 @@ Do NOT continue to the next row merely because membership remains 0. Posting Lan
 
 When membership questions appear, answer them automatically using this precedence:
 
-1. facts explicitly supplied by the user in the current task;
-2. project/business facts already provided for this campaign;
-3. `MEMBERSHIP_ANSWERS.md` approved templates.
+1. facts explicitly supplied in the current task;
+2. optional runtime identity/business/context facts supplied with this run;
+3. `MEMBERSHIP_ANSWERS.md` generic approved templates.
 
-### Automatically answer common rule/intent questions
+The Skill itself has no built-in organization, role, business, industry, location, or campaign identity.
+
+### Automatically answer generic rule questions
 
 Examples:
 
-- `Do you agree to the group rules?` → `Yes.`
+- `Do you agree to the group rules?` → `Yes.` only after the rules were actually checked.
 - `Will you avoid spam / irrelevant posts?` → `Yes.`
-- `Why do you want to join?` → use the truthful campaign/business purpose from known facts.
-- `Will you follow recruitment/job-posting rules?` → `Yes. I will follow the group rules and only share relevant opportunities where permitted.`
+- `Will you follow posting guidelines?` → `Yes.`
 
-For the StayChina campaign, when appropriate and truthful, the approved purpose text is:
+### Purpose / intent questions
+
+For questions such as `Why do you want to join?`, generate a short truthful response from runtime-supplied purpose/content facts.
+
+Generic form when facts support it:
 
 ```text
-I work with StayChina, connecting qualified international educators with schools and education institutions in China. I would like to join the community, follow the group rules, and share relevant opportunities only where permitted.
+I would like to join this community to participate in relevant discussions and share content related to <known purpose/content type> where permitted. I will follow the group rules.
 ```
+
+If no specific purpose is supplied and the question accepts a generic community-participation answer, use:
+
+```text
+I would like to join the community and participate in relevant discussions while following the group rules.
+```
+
+If the question explicitly requires a specific identity, affiliation, location, occupation, or other fact that is unknown, do not guess.
 
 ### Automatically select checkboxes/multiple-choice answers
 
-Select an option only when it truthfully matches known facts, such as:
+Select an option only when it truthfully matches runtime-supplied facts.
+
+Examples:
 
 - agree to rules;
-- recruiter;
-- education professional;
-- business/networking;
-- job-related participation.
+- user/customer/member type explicitly supplied in runtime facts;
+- business/recruiter/student/teacher/creator/etc. only if explicitly known.
 
-Do not choose `teacher`, a city, nationality, school affiliation, or any other identity fact unless explicitly known.
+Do not choose a city, nationality, employer, organization, profession, relationship, or identity merely to pass admission.
 
 ### Unknown factual question
 
-If a required question asks for an unknown fact such as current residence, nationality, employer/school, inviter/member name, personal history, verification data, or other identity-specific information:
+If a required question asks for an unknown fact such as current residence, nationality, employer, organization, inviter/member name, personal history, verification data, or any other identity-specific information:
 
 ```text
 已加入=0
@@ -190,7 +208,7 @@ Do not fabricate. Do not pause to ask the user. Save the row and continue evalua
 When all required join questions are answerable:
 
 1. fill every required field;
-2. tick required rule acknowledgements;
+2. tick required rule acknowledgements only when truthful;
 3. submit `Join Group` / `Submit` once;
 4. verify visible outcome;
 5. write `SUCCESS`, `PENDING_APPROVAL`, or `FAILED:<reason>`;
@@ -201,7 +219,7 @@ When all required join questions are answerable:
 
 If `已发送=0`:
 
-1. If composer/posting is currently available and rules permit the content, publish even when `已加入=0`.
+1. If composer/posting is currently available and rules permit the supplied content, publish even when `已加入=0`.
 2. If page explicitly requires membership and no posting path is available → `0 / BLOCKED:MEMBERSHIP_REQUIRED`.
 3. Before actual submission set `发送状态=IN_PROGRESS` and checkpoint if practical.
 4. Insert the user-provided content without inventing or changing material facts.
@@ -252,6 +270,7 @@ Never assume:
 入群失败 => 发帖失败
 发帖失败 => 入群失败
 有入群问题 => 必须停下来问用户
+帖子主题 => 用户身份/职业/组织关系
 ```
 
 ## Row-level vs global blockers
@@ -297,6 +316,10 @@ If the environment only permits writing at end of turn, maintain an exact mutati
 ## Compliance
 
 Do not fabricate user facts or bypass CAPTCHA, access controls, login challenges, group rules, administrator approval, platform restrictions, rate limits, or anti-spam protections. Do not use deceptive identities, account rotation, proxy rotation, or fingerprint evasion.
+
+## Generic-only invariant
+
+Core Postman files MUST remain business-agnostic. Specific brands, companies, industries, campaigns, products, jobs, locations, and identity facts may only appear as runtime input supplied for a particular execution, never as built-in defaults.
 
 ## End-of-run condition
 
