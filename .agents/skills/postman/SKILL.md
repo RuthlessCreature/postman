@@ -1,17 +1,15 @@
 ---
 name: postman
-description: Generic unattended, resumable group/community posting workflow driven by a seven-column Excel queue. Use when the user provides content plus a spreadsheet containing group name/URL, membership and sending status. The spreadsheet is the single source of truth. Process all currently actionable rows without mid-run user interaction, update status immediately after each side effect, skip completed rows, defer row-level blockers, and resume from the updated workbook in the next iteration.
+description: Generic unattended, resumable group/community posting workflow driven by a seven-column Excel queue. Membership and posting are independent state machines. Process all actionable rows without mid-run user interaction, check both lanes for every target, update Excel immediately after each side effect, defer row-level blockers, and resume from the updated workbook in the next iteration.
 ---
 
 # Postman
 
 ## Purpose
 
-Execute an **unattended batch** content-distribution workflow across groups or communities using a user-provided Excel queue.
+Execute an **unattended, resumable dual-lane content-distribution workflow** across groups or communities using a user-provided Excel queue.
 
-The user is not expected to intervene during a run. A run should process every currently actionable row, persist results into the workbook, defer unresolved rows, and return the updated workbook. The next run resumes from that workbook.
-
-This skill is platform-agnostic. It may be used with Facebook groups or other community platforms only when the environment has an authorized browser/computer-use capability and the requested actions comply with platform/group rules.
+The user is not expected to intervene during a run. Process every currently actionable row, persist all results into the workbook, defer unresolved work, and return the updated workbook. The next run resumes from that workbook.
 
 ## Required inputs
 
@@ -27,247 +25,282 @@ This skill is platform-agnostic. It may be used with Facebook groups or other co
 
 Do not silently rename, reorder, delete, or insert columns.
 
-## Core operating mode: UNATTENDED_BATCH
+## Core model: TWO INDEPENDENT LANES
+
+For every row, operate two logically independent state machines:
+
+### Membership Lane
+
+Controls only:
+
+- `已加入`
+- `入群状态`
+
+### Posting Lane
+
+Controls only:
+
+- `已发送`
+- `发送状态`
+
+Never assume membership is required merely because `已加入=0`.
+
+The following state is valid:
+
+```text
+已加入=0
+入群状态=PENDING_APPROVAL
+已发送=1
+发送状态=SUCCESS_VISIBLE
+```
+
+It means the join request is still pending while the group allows non-members to publish.
+
+The following is also valid:
+
+```text
+已加入=0
+入群状态=NEEDS_HUMAN:QUESTION_REQUIRES_USER_FACT
+已发送=1
+发送状态=SUCCESS_PENDING_REVIEW
+```
+
+A blocker in Membership Lane MUST NOT suppress Posting Lane when posting is independently available.
+
+Likewise, a posting failure MUST NOT prevent Membership Lane from advancing.
+
+Only create a dependency when visible platform behavior explicitly requires membership before posting.
+
+## Operating mode: UNATTENDED_BATCH
 
 During one run:
 
 - do not ask the user questions;
 - do not request per-group approval;
 - do not request posting confirmation;
-- do not wait for the user to solve row-level blockers;
-- do not stop after completing only a few rows;
+- do not stop because one lane is blocked;
+- do not stop because one row fails;
+- do not stop after a few successes;
 - process all rows that can be handled automatically;
 - convert unresolved work into spreadsheet state and continue.
 
-Human interaction, if needed, happens **between runs**, not during a run.
+Human interaction, if needed, happens between runs.
 
-The only reason to end external actions early is a **global hard blocker** that makes the entire current browser/account session unusable. Even then, save the workbook first and return it.
+A global hard blocker may end external actions early only when the entire browser/account session becomes unusable. Save the workbook first.
 
 ## Spreadsheet contract
 
 The workbook is the Single Source of Truth.
 
-### `已加入`
+### Membership Lane
 
-- `1`: membership/access required for posting has been confirmed.
-- `0`: not confirmed.
+`已加入`:
+
+- `1`: confirmed member.
+- `0`: not confirmed as a member.
 
 | Outcome | 已加入 | 入群状态 |
 |---|---:|---|
 | Already a member | 1 | `SUCCESS:ALREADY_MEMBER` |
-| Join succeeds immediately | 1 | `SUCCESS` |
-| Join request submitted, pending approval | 0 | `PENDING_APPROVAL` |
+| Join succeeds | 1 | `SUCCESS` |
+| Join request pending | 0 | `PENDING_APPROVAL` |
+| Posting works without membership and joining is unnecessary/unavailable | 0 | `NOT_REQUIRED:POSTING_ALLOWED_WITHOUT_MEMBERSHIP` |
 | Join fails | 0 | `FAILED:<reason>` |
-| Requires action outside this run | 0 | `NEEDS_HUMAN:<reason>` |
-| Not eligible / rule prevents joining | 0 | `SKIPPED:<reason>` |
+| Manual fact/action required | 0 | `NEEDS_HUMAN:<reason>` |
+| Join intentionally skipped | 0 | `SKIPPED:<reason>` |
 
-### `已发送`
+`NOT_REQUIRED:*` never changes `已加入` to 1.
 
-- `1`: the platform has accepted the content submission.
-- `0`: submission has not been accepted or confirmed.
+### Posting Lane
+
+`已发送`:
+
+- `1`: platform accepted this content submission.
+- `0`: submission is not confirmed accepted.
 
 | Outcome | 已发送 | 发送状态 |
 |---|---:|---|
-| Post visibly published | 1 | `SUCCESS_VISIBLE` |
-| Accepted and waiting for moderator/admin review | 1 | `SUCCESS_PENDING_REVIEW` |
+| Post visible | 1 | `SUCCESS_VISIBLE` |
+| Accepted for moderation | 1 | `SUCCESS_PENDING_REVIEW` |
+| Membership explicitly required before posting | 0 | `BLOCKED:MEMBERSHIP_REQUIRED` |
 | Submission failed | 0 | `FAILED:<reason>` |
-| Requires action outside this run | 0 | `NEEDS_HUMAN:<reason>` |
+| Manual action required | 0 | `NEEDS_HUMAN:<reason>` |
 | Posting intentionally skipped | 0 | `SKIPPED:<reason>` |
 
-`SUCCESS_PENDING_REVIEW` MUST set `已发送=1` to prevent duplicate submission on the next run.
+`SUCCESS_PENDING_REVIEW` MUST set `已发送=1` to prevent duplicate submission.
 
 ## Start-of-run recovery sweep
 
-Process rows in ascending `序号` unless the user specifies another order.
+Process rows in ascending `序号` unless specified otherwise.
 
-Before normal processing, interpret unresolved states:
+### Posting recovery
 
-### `已发送=1`
+- `已发送=1` → never publish again unless the user reset it between runs.
+- `发送状态=IN_PROGRESS` → verify actual page/post state before any retry.
+- `BLOCKED:MEMBERSHIP_REQUIRED` → re-check Membership Lane. If membership is now confirmed, Posting Lane becomes actionable.
+- `FAILED:*` → retry only if plausibly transient, at most once per run.
+- `NEEDS_HUMAN:*` → passively re-check once if external state may have changed; otherwise keep and continue.
 
-Never publish again unless the user explicitly reset it between runs.
+### Membership recovery
 
-### `IN_PROGRESS`
+- `已加入=1` → do not rejoin.
+- `入群状态=IN_PROGRESS` → verify real state before retry.
+- `PENDING_APPROVAL` → re-check whether approval happened; do not blindly resubmit.
+- `FAILED:*` → retry only when transient.
+- `NEEDS_HUMAN:*` → passively re-check once; never fabricate unknown facts.
 
-Treat as uncertain. Re-open the target and verify visible membership/post state before retrying any side effect. Never blindly click Join/Post again.
+## Per-row algorithm
 
-### `PENDING_APPROVAL`
+### Step 1 — Open once and inspect both lanes
 
-Re-check membership:
+Open the target and determine from visible evidence:
 
-- approved → set `已加入=1`, then continue to posting;
-- still pending → keep state and continue to next row;
-- rejected/request disappeared → record current evidence and, if normal joining is still available, one fresh join attempt may be made.
+- current membership state;
+- whether normal joining is available;
+- whether a composer/posting entry is already available to the current account;
+- whether the page explicitly says membership is required to post;
+- whether group/community rules prohibit the content.
 
-### `FAILED:*`
+Do not infer posting permission only from membership state.
 
-- transient failures may be retried once in a later run;
-- permanent rule/policy failures should be `SKIPPED:*`;
-- do not hammer the same failing action repeatedly in one run.
+### Step 2 — Advance Membership Lane independently
 
-### `NEEDS_HUMAN:*`
+If `已加入=0`:
 
-This does **not** mean pause and ask the user now.
+1. If already a member → `1 / SUCCESS:ALREADY_MEMBER`.
+2. Else if a normal join flow is available → attempt once.
+3. Answer only membership questions whose answers are explicitly known from user-provided facts.
+4. Unknown user-specific fact → `0 / NEEDS_HUMAN:QUESTION_REQUIRES_USER_FACT`.
+5. Immediate join success → `1 / SUCCESS`.
+6. Join request submitted → `0 / PENDING_APPROVAL`.
+7. Join failure → `0 / FAILED:<reason>`.
+8. If joining is unnecessary/unavailable while posting is already permitted → `0 / NOT_REQUIRED:POSTING_ALLOWED_WITHOUT_MEMBERSHIP` when this accurately describes the page.
+9. Checkpoint after each material change.
 
-- passively re-check once if the external state could have changed between runs;
-- if the same manual requirement remains, keep the state and continue;
-- if resolution requires unknown user facts, CAPTCHA, identity verification, or other manual action, do not fabricate or bypass it.
+Do NOT `continue` to the next row merely because membership remains 0. Posting Lane still must be evaluated.
 
-## Per-row state machine
+### Step 3 — Advance Posting Lane independently
 
-### Step 1 — Skip completed work
+If `已发送=0`:
 
-If `已发送 == 1`, continue immediately to the next row.
+1. If a posting composer/action is currently available and rules permit the content, attempt publication even when `已加入=0`.
+2. If the platform explicitly states membership is required and no posting path is currently available → `0 / BLOCKED:MEMBERSHIP_REQUIRED`.
+3. Before an actual submission, set `发送状态=IN_PROGRESS` and checkpoint if practical.
+4. Insert the user-provided content without inventing or altering material facts.
+5. Submit once.
+6. Verify visible outcome.
+7. Visible → `1 / SUCCESS_VISIBLE`.
+8. Accepted for review → `1 / SUCCESS_PENDING_REVIEW`.
+9. Failed → `0 / FAILED:<reason>`.
+10. Manual requirement → `0 / NEEDS_HUMAN:<reason>`.
+11. Checkpoint and continue.
 
-### Step 2 — Validate target
+### Step 4 — Reconcile explicit dependency only when real
 
-Require usable `group名称` and `group url`.
+If Posting Lane is `BLOCKED:MEMBERSHIP_REQUIRED` and Membership Lane becomes `已加入=1` in the same visit, immediately re-check whether the posting composer is now available. If yes, proceed to publish in the same run.
 
-If invalid/unreachable:
+If membership remains pending but posting was independently available and succeeded, preserve both independent states. Do not force Membership Lane to success.
 
-- record `FAILED:INVALID_TARGET` or `FAILED:UNREACHABLE_TARGET`;
-- checkpoint;
-- continue.
+## Valid combinations
 
-### Step 3 — Resolve membership
+These are valid and must not be normalized away:
 
-If `已加入 == 0`:
+```text
+D=0 / E=PENDING_APPROVAL
+F=1 / G=SUCCESS_VISIBLE
+```
 
-1. Open the target.
-2. Determine current membership/access from visible evidence.
-3. Already a member → `1 / SUCCESS:ALREADY_MEMBER` and checkpoint.
-4. If normal joining is permitted, attempt it once.
-5. Answer only questions whose answers are explicitly known from user-provided facts.
-6. If a question requires unknown identity, location, employment, affiliation, invitation, or personal-history facts → `0 / NEEDS_HUMAN:QUESTION_REQUIRES_USER_FACT`, checkpoint, continue to next row.
-7. Immediate success → `1 / SUCCESS`.
-8. Request submitted → `0 / PENDING_APPROVAL`.
-9. Failure → `0 / FAILED:<reason>`.
-10. Checkpoint after each material transition.
+```text
+D=0 / E=FAILED:JOIN_NOT_AVAILABLE
+F=1 / G=SUCCESS_PENDING_REVIEW
+```
 
-If membership remains `0` and posting requires membership, continue to the next row.
+```text
+D=1 / E=SUCCESS
+F=0 / G=FAILED:POSTING_DISABLED
+```
 
-### Step 4 — Publish
+```text
+D=0 / E=PENDING_APPROVAL
+F=0 / G=BLOCKED:MEMBERSHIP_REQUIRED
+```
 
-Only attempt when:
+## Invalid assumptions
 
-- `已发送 == 0`;
-- posting permission is available;
-- group/community rules do not prohibit the content;
-- no global account-level blocker exists.
+Never assume:
 
-Before submission, set `发送状态=IN_PROGRESS` and checkpoint if practical.
-
-Then:
-
-1. Open composer.
-2. Insert the user-provided content.
-3. Preserve substantive facts and contact details.
-4. Submit once.
-5. Verify visible outcome.
-6. Visible post → `已发送=1 / SUCCESS_VISIBLE`.
-7. Accepted for moderation → `已发送=1 / SUCCESS_PENDING_REVIEW`.
-8. Failure → `已发送=0 / FAILED:<reason>`.
-9. Manual requirement → `已发送=0 / NEEDS_HUMAN:<reason>`.
-10. Checkpoint and continue.
+```text
+已加入=0 => 不能发
+已加入=1 => 一定能发
+已发送=1 => 已加入=1
+入群失败 => 发帖失败
+发帖失败 => 入群失败
+```
 
 ## Row-level blockers versus global hard blockers
 
-### Row-level blockers — MUST continue batch
-
-Examples:
+Row-level problems MUST NOT terminate the batch:
 
 - group unavailable;
-- membership pending;
-- join denied;
-- membership question requires unknown user fact;
+- join pending/denied;
+- membership question needs unknown facts;
+- membership unavailable;
 - posting disabled for one group;
-- group rule prohibits the content;
-- one page structure is unusable;
-- one action times out or fails.
+- content prohibited by one group;
+- one lane fails while the other can proceed;
+- one page structure is unusable.
 
-Response: update that row, save, continue.
-
-### Global hard blockers — may end external actions
-
-Only when the blocker makes the whole current browser/account session unusable:
+Global blockers may stop external actions only when they make the whole session unusable:
 
 - session-wide login/device verification;
-- CAPTCHA that blocks all further navigation/actions;
-- account-level/platform-wide posting restriction;
+- CAPTCHA blocking all further navigation/actions;
+- account-wide posting restriction;
 - browser/computer-use capability unavailable.
 
-Response:
-
-1. update current row when relevant;
-2. checkpoint the workbook;
-3. do not ask the user mid-run;
-4. stop further external side effects;
-5. return the updated workbook and blocker summary.
-
-If a CAPTCHA or error affects only one row and the session remains usable elsewhere, treat it as row-level and continue.
+Before stopping: update the current row when relevant, checkpoint the workbook, do not ask the user mid-run, and return the updated workbook.
 
 ## Checkpoint discipline
 
-Checkpoint after every material state transition, especially after:
+Checkpoint after every material state transition in either lane. Never wait until the whole batch finishes.
 
-- membership confirmation;
-- join submission;
-- join failure;
-- successful join;
-- post submission;
-- post failure;
-- moderation-pending result;
-- deferred manual blocker.
+If the environment only permits writing the file at the end, maintain an exact mutation log and apply every completed mutation before returning. Never claim a workbook update unless the updated file actually exists.
 
-If the environment only permits returning a modified file at the end of a turn, keep an exact mutation log and apply/save all completed row changes before returning. Never claim an update unless the updated workbook actually exists.
-
-## Idempotency rules
+## Idempotency
 
 1. `已发送=1` is an absolute duplicate-post guard.
-2. `PENDING_APPROVAL` is re-checked later, not blindly re-submitted.
-3. `SUCCESS_PENDING_REVIEW` counts as already sent.
-4. `IN_PROGRESS` must be verified before retry.
-5. `FAILED:*` may be retried on a later run only when the failure is plausibly transient.
-6. `SKIPPED:*` is not retried unless reset/reclassified.
-7. `NEEDS_HUMAN:*` is never hammered repeatedly in the same run.
-8. A row-level failure never terminates the batch.
-
-## Content integrity
-
-Default behavior is to publish the content exactly as provided.
-
-Do not invent salaries, benefits, employers, locations, qualifications, contact details, or membership-question answers. If localized formatting is authorized, preserve all substantive facts.
+2. `已加入=1` is an absolute duplicate-join guard.
+3. `SUCCESS_PENDING_REVIEW` counts as sent.
+4. `PENDING_APPROVAL` is re-checked later, not blindly re-submitted.
+5. `IN_PROGRESS` in either lane must be verified before retry.
+6. `BLOCKED:MEMBERSHIP_REQUIRED` becomes retryable when Membership Lane later reaches 1.
+7. A Membership Lane blocker never suppresses an independently available Posting Lane.
+8. A Posting Lane blocker never suppresses Membership Lane.
 
 ## Compliance
 
-Do not bypass CAPTCHA, access controls, login challenges, group rules, administrator approval, platform restrictions, rate limits, or anti-spam protections. Do not use account rotation, stealth/fingerprint evasion, proxy rotation, or deceptive identities.
+Do not bypass CAPTCHA, access controls, login challenges, group rules, administrator approval, platform restrictions, rate limits, or anti-spam protections. Do not use deceptive identities, account rotation, proxy rotation, or fingerprint evasion.
 
 ## End-of-run condition
 
-Continue until one of these is true:
+Continue until:
 
-- every row has been scanned;
-- all remaining rows are non-actionable this run;
+- every row has been scanned and both lanes evaluated where applicable;
+- all remaining lane actions are non-actionable this run;
 - a global hard blocker makes the current session unusable;
-- a user-defined batch limit has been reached.
+- a user-defined batch limit is reached.
 
-Do not stop merely because some work has already been completed.
+Do not stop merely because some rows were already completed.
 
 ## Final report
 
-Return once, at the end of the run:
+Return once at the end:
 
 - updated workbook;
 - rows inspected;
-- completed rows skipped;
-- newly joined;
-- join requests pending;
-- join failures;
-- deferred `NEEDS_HUMAN` rows;
-- posts visible;
-- posts pending review;
-- post failures;
-- skipped rows;
-- unresolved row numbers for the next run;
-- global blocker, if any.
+- membership actions attempted/succeeded/pending/failed/deferred;
+- posting actions attempted/visible/pending-review/blocked/failed/deferred;
+- rows where posting succeeded without membership;
+- unresolved row numbers for next run;
+- global blocker if any.
 
 Do not interrupt the run with user-facing questions.
