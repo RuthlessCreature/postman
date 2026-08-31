@@ -1,236 +1,190 @@
-# Postman
+# Postman V2
 
-通用的群组/社区内容分发状态机，面向 ChatGPT Work、Codex 或其他具备浏览器操作能力的 Agent。
+通用的群组/社区内容分发状态机，面向具备浏览器操作能力的 Agent。
 
-Postman 的核心是：**无人值守单轮批处理 + Excel 跨轮次持久化 + 入群与发帖双轨独立推进**。
+V2 的最终架构不是“一张大表塞所有东西”，而是两份 Excel：
 
 ```text
-上传帖子 + Excel
-    ↓
-本轮无人值守自动处理
-    ↓
-每个群同时评估两条独立轨道
-    ├─ Membership Lane：是否已加入 / 是否可以申请加入
-    └─ Posting Lane：当前是否可以直接发帖
-    ↓
-哪个能推进就推进哪个
-    ↓
-每个动作后立即回写 Excel
-    ↓
-无法处理的状态记录后继续下一行
-    ↓
-返回更新后的 Excel
-    ↓
-下一轮重新上传，继续迭代
+Group State Workbook                 Content Library Workbook
+去哪发 / 当前状态 / 历史              发什么 / Campaign / Post_ID
+        │                                      │
+        └──────────── Postman runtime ─────────┘
+                         │
+                         ↓
+             Campaign + 群类型 + 语言 + 历史
+                         ↓
+                    选择 Post_ID
+                         ↓
+              执行加入 / 发帖双轨
+                         ↓
+          写回 Groups + Post_History
 ```
 
-**人的介入点只在两轮之间，不在单次运行过程中。**
+## 为什么要拆成两份
 
-## 固定 Excel
+群组表是执行数据库；文案库是母版。
 
-固定七列，从左到右不得改名或换序：
+- 换 Campaign，不需要改 1000 多行群组。
+- 加一篇文案，只往 Copy Library 加一行。
+- 群组执行失败，不污染文案库。
+- 同一个群可以在不同 Campaign 中使用不同 Post_ID。
+- `Post_History` 可以跨轮次防止重复发送。
 
-| 列 | 字段 | 说明 |
-|---|---|---|
-| A | 序号 | 唯一行序号 |
-| B | group名称 | 群组/社区名称 |
-| C | group url | 目标群组 URL |
-| D | 已加入 | `0/1`，只表示成员事实 |
-| E | 入群状态 | 只描述成员/入群轨道 |
-| F | 已发送 | `0/1`，只表示帖子是否已被平台接受 |
-| G | 发送状态 | 只描述发帖轨道 |
+## Group State Workbook
 
-模板：`postman_queue_template.xlsx`
+V2 保留原始七列在最左边，所以旧文件仍然能直接喂：
 
-## 最重要的设计：入群与发帖互相独立
+1. 序号
+2. group名称
+3. group url
+4. 已加入
+5. 入群状态
+6. 已发送
+7. 发送状态
 
-禁止使用以下错误逻辑：
+Postman 会 append-only 自动追加：
+
+- Group_Type
+- Language
+- Campaign_ID
+- Last_Post_ID
+- Last_Post_Time
+- Next_Eligible_At
+- Send_Count
+- Last_Post_URL
+- Last_Result
+- Failure_Reason
+- Last_Checked_At
+- Group_Rules_Summary
+- Promo_Allowed
+- Notes
+
+并创建：
+
+- `Post_History`
+- `Run_Config`
+
+旧七列永不删除、永不换序。
+
+模板：`postman_group_queue_v2_template.xlsx`
+
+## Content Library Workbook
+
+核心 Sheet：`Copy_Index`
+
+每篇文案有唯一：
 
 ```text
-已加入=0
+Post_ID
+Campaign_ID
+```
+
+并带：
+
+- 受众类型
+- 群类型匹配
+- 语言
+- 地域
+- Angle
+- Hook
+- 完整 Body_Copy
+- Landing URL
+- Priority / Weight
+- Cooldown
+- Compliance Note
+
+另外包含：
+
+- `Campaigns`
+- `Match_Rules`
+- `Library_Config`
+
+正常运行时 Content Library **只读**。
+
+模板：`post_copy_library_v2_template.xlsx`
+
+## V2 选择逻辑
+
+Postman 不要求你给每个群手工绑定一篇帖子。
+
+它会：
+
+```text
+resolve Campaign
   ↓
-必须先加入
+match Group_Type + Language + Geo
   ↓
-没有加入就不检查能不能发
-```
-
-正确逻辑是：打开一个 group 后，同时判断两个问题：
-
-1. **Membership Lane**：现在是不是成员？不是的话，能否正常申请加入？
-2. **Posting Lane**：不管是不是成员，当前页面是否已经提供合法的发帖入口？
-
-因此以下状态完全合法：
-
-```text
-已加入=0
-入群状态=PENDING_APPROVAL
-已发送=1
-发送状态=SUCCESS_VISIBLE
-```
-
-含义：入群申请仍在审核，但该群允许非成员发帖，帖子已经成功发布。
-
-另一种合法状态：
-
-```text
-已加入=0
-入群状态=NEEDS_HUMAN:QUESTION_REQUIRES_USER_FACT
-已发送=1
-发送状态=SUCCESS_PENDING_REVIEW
-```
-
-含义：入群问题不能自动回答，但这不妨碍该群允许直接投稿。
-
-**`已加入=0` 永远不能单独作为“不尝试发送”的理由。**
-
-只有页面明确显示“必须成为成员后才能发帖”时，Posting Lane 才被 Membership Lane 阻塞。
-
-## 无人值守模式
-
-默认模式：
-
-```text
-UNATTENDED_BATCH
-```
-
-单次运行中 Agent 必须：
-
-1. 不向用户提问；
-2. 不逐群确认；
-3. 不要求发帖前确认；
-4. 不因为某一行失败而停止；
-5. 不因为某一行需要人工信息而停止；
-6. 不因为入群待审核而停止；
-7. 入群失败后仍检查该群是否可直接发帖；
-8. 发帖失败后仍允许 Membership Lane 继续完成；
-9. 每个外部动作后立即回写 Excel；
-10. 扫描全部本轮可自动处理的行；
-11. 最终一次性返回更新后的 Excel。
-
-## 两条独立状态轨道
-
-### Membership Lane
-
-`已加入`：
-
-- `1`：确认已经是成员；
-- `0`：当前没有确认成员身份。
-
-常用 `入群状态`：
-
-- `PENDING`
-- `IN_PROGRESS`
-- `SUCCESS`
-- `SUCCESS:ALREADY_MEMBER`
-- `PENDING_APPROVAL`
-- `NOT_REQUIRED:POSTING_ALLOWED_WITHOUT_MEMBERSHIP`
-- `FAILED:<reason>`
-- `SKIPPED:<reason>`
-- `NEEDS_HUMAN:<reason>`
-
-`NOT_REQUIRED:*` 不等于已经加入，因此 `已加入` 仍为 `0`。
-
-### Posting Lane
-
-`已发送`：
-
-- `1`：平台已经接受本次帖子提交；
-- `0`：尚未确认提交成功。
-
-常用 `发送状态`：
-
-- `PENDING`
-- `IN_PROGRESS`
-- `SUCCESS_VISIBLE`
-- `SUCCESS_PENDING_REVIEW`
-- `BLOCKED:MEMBERSHIP_REQUIRED`
-- `FAILED:<reason>`
-- `SKIPPED:<reason>`
-- `NEEDS_HUMAN:<reason>`
-
-**等待管理员审核也必须记为 `已发送=1`**，防止下一轮重复提交。
-
-## 单行推荐流程
-
-```text
-OPEN GROUP ONCE
+apply Match_Rules
   ↓
-READ CURRENT PAGE STATE
+check Post_History / cooldown
   ↓
-┌────────────────────────────┬────────────────────────────┐
-│ Membership Lane            │ Posting Lane               │
-│                            │                            │
-│ D=1 → 不再申请加入          │ F=1 → 永不重复发           │
-│ D=0 → 检查成员状态          │ F=0 → 检查当前发帖入口      │
-│ 能申请 → 正常申请           │ 能直接发 → 直接发           │
-│ 待审核 → PENDING_APPROVAL  │ 需成员 → BLOCKED           │
-│ 问题无法答 → NEEDS_HUMAN   │ 可提交 → 提交并验证         │
-└────────────────────────────┴────────────────────────────┘
+rank Priority + Weight
   ↓
-分别回写 D/E 与 F/G
+select Post_ID
   ↓
-SAVE
-  ↓
-NEXT ROW
+publish Body_Copy
 ```
 
-浏览器操作实际可以顺序点击，但**逻辑上两条 Lane 必须独立，不得人为串行依赖**。
+### 默认重复策略
 
-## 跨轮次恢复
-
-下一轮根据 Excel 继续：
-
-- `已发送=1` → 永不再次发送；
-- `PENDING_APPROVAL` → 自动复核成员审批；
-- `BLOCKED:MEMBERSHIP_REQUIRED` → 先复核成员状态；如果已经加入，再重新尝试发送；
-- `FAILED:*` → 临时失败可保守重试；
-- `NEEDS_HUMAN:*` → 被动检查阻塞是否已在两轮之间解除；
-- `IN_PROGRESS` → 先验证真实页面结果，再决定是否重试。
-
-Excel 就是任务的持久化状态数据库。
-
-## 核心不变量
+安全默认：
 
 ```text
-已加入=0  ≠  不能发帖
-已加入=1  ≠  一定能发帖
-已发送=1  ≠  已加入=1
-入群失败   ≠  发帖失败
-发帖失败   ≠  入群失败
+ONCE_PER_CAMPAIGN
 ```
 
-只有平台明确要求 membership 时：
+同一个群、同一个 Campaign 成功发过后，不自动再发。
+
+如果确实需要长期持续投放，可以显式启用：
 
 ```text
-Posting Lane --depends-on--> Membership Lane
+ROTATE_AFTER_COOLDOWN
 ```
 
-否则两条轨道独立。
+但只有群规允许商业/推广内容并且 cooldown 已到期才允许再次发送。
 
-## 使用
+Postman 不使用换文案、换账号、代理、时间伪装等方式绕过平台反垃圾或群规。
 
-### Codex / Skill
+## 最重要的设计仍然不变：双轨独立
+
+每个 group 同时评估：
+
+- Membership Lane：能不能/需不需要加入；
+- Posting Lane：现在能不能直接发。
 
 ```text
-.agents/skills/postman/SKILL.md
+已加入=0 ≠ 不能发帖
 ```
 
-最短调用：
+有些群允许非成员投稿，所以入群审核中也可能已经成功发帖。
+
+只有页面明确要求 membership 时，Posting Lane 才依赖 Membership Lane。
+
+## 无人值守
+
+单次运行中：
+
+- 不逐群问用户；
+- 入群问题能根据已知真实事实回答就自动填写；
+- 无法真实回答的写 `NEEDS_HUMAN` 后继续；
+- 群规禁止推广就跳过；
+- 一个群失败不影响下一行；
+- 每个真实 side effect 后 checkpoint；
+- 所有实际发帖尝试追加到 `Post_History`；
+- 最后返回更新后的 Group State Workbook。
+
+## 推荐调用
 
 ```text
-Use $postman. Run unattended. Treat membership and posting as independent lanes. For every row, check both lanes and advance whichever is actionable. Do not require membership before posting unless the platform explicitly requires it. Checkpoint the Excel after every side effect and return the updated workbook.
+Use $postman in V2 unattended mode.
+Load the group-state workbook and the content-library workbook.
+Auto-migrate legacy seven-column group queues append-only.
+Treat membership and posting as independent lanes.
+Resolve Campaign_ID, match group type/language, select an eligible Post_ID using Match_Rules and Post_History, respect group rules and duplicate/cooldown guards, publish only when permitted, append Post_History, checkpoint after side effects, and return the updated group-state workbook.
 ```
 
-### ChatGPT Work / 通用 Chat
-
-使用 `PROMPT_CHATGPT.md`。
-
-最短调用：
-
-```text
-按 Postman 无人值守双轨模式继续。入群和发帖分开判断、同步推进；即使已加入=0，也必须检查当前是否允许直接发帖。每个动作后回写 Excel；单行阻塞继续下一行；最终返回更新后的 Excel。
-```
+详细字段见 `SCHEMA.md`。
 
 ## 非目标
 
-Postman 不负责绕过验证码、登录安全机制、群规、管理员审核、平台风控或账号限制，也不伪造入群问题答案。
+Postman 不负责绕过 CAPTCHA、登录验证、群规、管理员审核、平台限制、频率限制或反垃圾机制，也不伪造入群问题答案。
